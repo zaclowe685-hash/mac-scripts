@@ -47,8 +47,10 @@ move() {
 
 # ── 2. Sort Downloads by subject ─────────────────────────────────────────────
 echo "[ Downloads → OneDrive $TERM ]"
+found_dl=false
 for f in "$DL"/*; do
   [[ -f "$f" ]] || continue
+  found_dl=true
   name=$(basename "$f")
   namel="${name,,}"  # lowercase for matching
 
@@ -84,6 +86,7 @@ for f in "$DL"/*; do
       UNKNOWN+=("$f") ;;
   esac
 done
+$found_dl || echo "  None found."
 echo ""
 
 # ── 3. Tidy OneDrive root ────────────────────────────────────────────────────
