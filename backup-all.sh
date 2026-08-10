@@ -84,8 +84,9 @@ for p in "${PROJECTS[@]}"; do
     log "    + commit ($local_dirty files)"
     if (( ! DRY )); then
       git -C "$p" add -A
-      git -C "$p" -c user.name="Zac" -c user.email="zac.lowe685@gmail.com" \
-        commit -q -m "Backup: snapshot before first push to GitHub" || true
+      # Use the global git identity — it is set to a GitHub noreply address,
+      # which keeps the real email out of commit metadata. Never hardcode one.
+      git -C "$p" commit -q -m "Backup: snapshot" || true
     fi
   else
     log "    = nothing new to commit"
