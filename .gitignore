@@ -1,0 +1,13 @@
+# added by backup-all.sh
+.DS_Store
+*.log
+__pycache__/
+*.pyc
+.env
+.env.local
+.dev.vars
+.wrangler/
+.netlify/
+venv/
+.venv/
+node_modules/
