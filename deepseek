@@ -1,0 +1,305 @@
+#!/usr/bin/env python3
+"""
+deepseek — talk to the DeepSeek API from the terminal.
+
+IMPORTANT: ~/scripts is the PUBLIC mac-scripts repo.
+This file must never contain the API key. It reads ~/.config/deepseek/key
+at runtime (same pattern as `glm` and `ox`).
+
+  deepseek key                 paste your key in and save it (chmod 600)
+  deepseek check               is the key real? does the API answer? what's the balance?
+  deepseek balance             how much money is left
+  deepseek models              what models the account can see
+  deepseek peak                are we in the double-price window right now?
+  deepseek ask "..."           one-shot question    (--pro for the smart model)
+  deepseek cost IN OUT         what N input / N output tokens would cost
+
+Everything hits https://api.deepseek.com, which is OpenAI-compatible — so
+anything you build can use the openai python/js SDK with base_url set to it.
+"""
+
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+
+BASE = "https://api.deepseek.com"
+KEY_FILE = os.path.expanduser("~/.config/deepseek/key")
+
+FLASH = "deepseek-v4-flash"
+PRO = "deepseek-v4-pro"
+
+# USD per 1M tokens, OFF-PEAK. Peak is exactly double. Checked 2026-08-29
+# against https://api-docs.deepseek.com/quick_start/pricing
+PRICES = {
+    FLASH: {"hit": 0.007, "miss": 0.22, "out": 0.66},
+    PRO:   {"hit": 0.022, "miss": 0.66, "out": 1.98},
+}
+
+DIM = "\033[2m"
+RED = "\033[31m"
+GRN = "\033[32m"
+YEL = "\033[33m"
+OFF = "\033[0m"
+
+
+def die(msg):
+    print(f"{RED}{msg}{OFF}", file=sys.stderr)
+    sys.exit(1)
+
+
+def note(msg):
+    print(f"{DIM}{msg}{OFF}", file=sys.stderr)
+
+
+# ------------------------------------------------------------------- the key --
+
+def read_key():
+    if not os.path.exists(KEY_FILE):
+        die(
+            "No DeepSeek key yet.\n"
+            "  1. get one at https://platform.deepseek.com/api_keys\n"
+            "  2. run:  deepseek key"
+        )
+    key = open(KEY_FILE).read().strip()
+    if not key:
+        die(f"{KEY_FILE} is empty. Run:  deepseek key")
+    return key
+
+
+def ask_via_dialog():
+    """No keyboard on this shell (Run button, launchd, a pipe) — so ask macOS
+    to put a real dialog box on screen instead. Without this, input() gets an
+    instant EOF and the paste is silently thrown away."""
+    import subprocess
+    script = (
+        'text returned of (display dialog '
+        '"Paste your DeepSeek API key\n\nGet one at platform.deepseek.com/api_keys" '
+        'default answer "" with title "DeepSeek key" '
+        'buttons {"Cancel", "Save"} default button "Save")'
+    )
+    try:
+        out = subprocess.run(["osascript", "-e", script],
+                             capture_output=True, text=True, timeout=300)
+    except Exception as e:
+        die(f"could not open a dialog ({e}) — open Terminal.app yourself and run: deepseek key")
+    if out.returncode != 0:
+        die("cancelled")
+    return out.stdout.strip()
+
+
+def save_key():
+    if sys.stdin.isatty():
+        print("Paste your DeepSeek API key (from https://platform.deepseek.com/api_keys)")
+        print(f"{DIM}It starts with sk- . Nothing is echoed anywhere but this file.{OFF}")
+        try:
+            key = input("key: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            die("cancelled")
+    else:
+        note("no keyboard on this shell — opening a dialog box instead")
+        key = ask_via_dialog()
+
+    if not key:
+        die("nothing pasted")
+    if not key.startswith("sk-"):
+        note("warning: that doesn't start with sk- — saving it anyway")
+
+    os.makedirs(os.path.dirname(KEY_FILE), mode=0o700, exist_ok=True)
+    with open(KEY_FILE, "w") as f:
+        f.write(key + "\n")
+    os.chmod(KEY_FILE, 0o600)
+    print(f"{GRN}saved to {KEY_FILE}{OFF}  (only you can read it)")
+    print()
+    do_check()
+
+
+# --------------------------------------------------------------------- http --
+
+def call(path, payload=None, method=None):
+    key = read_key()
+    url = f"{BASE}{path}"
+    data = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(url, data=data, method=method or ("POST" if data else "GET"))
+    req.add_header("Authorization", f"Bearer {key}")
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            return json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")
+        try:
+            body = json.loads(body).get("error", {}).get("message", body)
+        except Exception:
+            pass
+        if e.code == 401:
+            die(f"401 — the key was rejected.\n{body}\nMake a fresh one at https://platform.deepseek.com/api_keys then run: deepseek key")
+        if e.code == 402:
+            die(f"402 — out of money.\nTop up at https://platform.deepseek.com/top_up")
+        if e.code == 429:
+            die("429 — rate limited. Wait a moment and try again.")
+        die(f"HTTP {e.code} — {body}")
+    except urllib.error.URLError as e:
+        die(f"Could not reach {BASE} — {e.reason}")
+
+
+# ------------------------------------------------------------------ commands --
+
+def do_balance(quiet=False):
+    d = call("/user/balance")
+    infos = d.get("balance_infos") or []
+    if not infos:
+        die("no balance info came back")
+    usd = next((b for b in infos if b.get("currency") == "USD"), infos[0])
+    total = float(usd.get("total_balance", 0))
+    topped = float(usd.get("topped_up_balance", 0) or 0)
+    granted = float(usd.get("granted_balance", 0) or 0)
+
+    colour = GRN if total > 1 else (YEL if total > 0.2 else RED)
+    print(f"balance   {colour}${total:.4f} {usd.get('currency','USD')}{OFF}")
+    if granted:
+        print(f"{DIM}          ${topped:.4f} paid  +  ${granted:.4f} free credit{OFF}")
+    if not d.get("is_available", True):
+        print(f"{RED}          account cannot make calls right now (out of credit?){OFF}")
+    if not quiet:
+        calls = int(total / cost_of(FLASH, 1000, 300, peak=False)) if total > 0 else 0
+        print(f"{DIM}          ≈ {calls:,} more flash calls at 1k in / 300 out, off-peak{OFF}")
+    return total
+
+
+def do_models():
+    d = call("/models")
+    for m in d.get("data", []):
+        print(m.get("id"))
+
+
+def is_peak(now=None):
+    """Peak = 01:00-04:00 and 06:00-10:00 UTC, Mon-Fri. Peak costs double."""
+    now = now or datetime.now(timezone.utc)
+    if now.weekday() >= 5:
+        return False
+    h = now.hour
+    return (1 <= h < 4) or (6 <= h < 10)
+
+
+def do_peak():
+    now = datetime.now(timezone.utc)
+    local = datetime.now().astimezone()
+    if is_peak(now):
+        print(f"{YEL}PEAK — everything costs double right now.{OFF}")
+    else:
+        print(f"{GRN}OFF-PEAK — half price right now.{OFF}")
+    print(f"{DIM}now: {local:%a %H:%M} local  /  {now:%a %H:%M} UTC{OFF}")
+    print(f"{DIM}peak window is 01:00-04:00 and 06:00-10:00 UTC, Mon-Fri{OFF}")
+    print(f"{DIM}in Sydney (UTC+10) that is 11:00-14:00 and 16:00-20:00, Mon-Fri{OFF}")
+
+
+def cost_of(model, tokens_in, tokens_out, peak=None, cached=False):
+    p = PRICES[model]
+    if peak is None:
+        peak = is_peak()
+    mult = 2.0 if peak else 1.0
+    rate_in = p["hit"] if cached else p["miss"]
+    return mult * (tokens_in * rate_in + tokens_out * p["out"]) / 1_000_000
+
+
+def do_cost(args):
+    if len(args) < 2:
+        die("usage: deepseek cost <input tokens> <output tokens>")
+    ti, to = int(args[0]), int(args[1])
+    print(f"{ti:,} in / {to:,} out\n")
+    for model in (FLASH, PRO):
+        off = cost_of(model, ti, to, peak=False)
+        on = cost_of(model, ti, to, peak=True)
+        print(f"  {model:<28} ${off:.6f} off-peak   ${on:.6f} peak")
+        print(f"{DIM}  {'':<28} {int(5/off):,} calls per $5 off-peak{OFF}")
+
+
+def do_ask(args):
+    model = FLASH
+    if "--pro" in args:
+        model = PRO
+        args = [a for a in args if a != "--pro"]
+    prompt = " ".join(args).strip()
+    if not prompt:
+        prompt = sys.stdin.read().strip()
+    if not prompt:
+        die('usage: deepseek ask "your question"   (--pro for the smart model)')
+
+    t0 = time.time()
+    d = call("/chat/completions", {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
+    })
+    took = time.time() - t0
+
+    print(d["choices"][0]["message"]["content"])
+
+    u = d.get("usage", {})
+    ti = u.get("prompt_tokens", 0)
+    to = u.get("completion_tokens", 0)
+    cached = u.get("prompt_cache_hit_tokens", 0)
+    fresh = ti - cached
+    c = (cost_of(model, fresh, 0) + cost_of(model, cached, 0, cached=True)
+         + cost_of(model, 0, to))
+    print()
+    print(f"{DIM}{model} · {ti} in ({cached} cached) / {to} out · "
+          f"{took:.1f}s · ${c:.6f} · {'PEAK' if is_peak() else 'off-peak'}{OFF}")
+
+
+def do_check():
+    print(f"{DIM}key file  {KEY_FILE}{OFF}")
+    read_key()
+    print(f"{GRN}key       found{OFF}")
+    do_balance(quiet=True)
+    print(f"{DIM}pinging {FLASH}...{OFF}")
+    t0 = time.time()
+    d = call("/chat/completions", {
+        "model": FLASH,
+        "messages": [{"role": "user", "content": "Reply with exactly: ok"}],
+        "max_tokens": 32,
+        "stream": False,
+    })
+    reply = (d["choices"][0]["message"]["content"] or "").strip()
+    if not reply:
+        # An empty string is NOT a working API — say so rather than showing a
+        # green tick over nothing. (max_tokens too low does exactly this.)
+        die(f"api answered in {time.time()-t0:.1f}s but sent back NO TEXT — usage was {d.get('usage')}")
+    print(f"{GRN}api       answered in {time.time()-t0:.1f}s — {reply!r}{OFF}")
+    print()
+    print(f"{GRN}All good. You're set up.{OFF}")
+    do_peak()
+
+
+def main():
+    args = sys.argv[1:]
+    if not args or args[0] in ("-h", "--help", "help"):
+        print(__doc__.strip())
+        return
+    cmd, rest = args[0], args[1:]
+    if cmd == "key":
+        save_key()
+    elif cmd == "check":
+        do_check()
+    elif cmd == "balance":
+        do_balance()
+    elif cmd == "models":
+        do_models()
+    elif cmd == "peak":
+        do_peak()
+    elif cmd == "cost":
+        do_cost(rest)
+    elif cmd == "ask":
+        do_ask(rest)
+    else:
+        # `deepseek "just ask me something"` with no subcommand
+        do_ask(args)
+
+
+if __name__ == "__main__":
+    main()

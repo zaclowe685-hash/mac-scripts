@@ -16,13 +16,25 @@ cd "$HOME" || exit 1
 
 # Every real project folder. Add new ones here (or let /new-project do it).
 PROJECTS=(
+  "grove"
+  "night-shift"
+  "payback"
+  "ox-lab"
+  "stash"
   abyssal basketball-game camping-map chess_game court-1v1 crimson-moon
   deep-field dinner-planner earth-impact escape-rooms forest-walk gap-map
   glm-prompts hoopfeel house-walkthrough lumen meal-planner meridian
-  morning-briefing project-hub redline scripts specimen streetball-mine
+  maine-country morning-briefing project-hub redline scripts specimen streetball-mine
   streetball-pro streetball-raw subtracker taskify tower_defence vinterheim
-  voiceflow voidstrike xenathel "Space Journey"
+  desmos-fourier model-mode voiceflow voidstrike xenathel "Space Journey"
+  hours mystery bench thornbridge dynasty long-night court-legends
 )
+
+# These repos are deliberately PUBLIC and must stay public — they are live
+# GitHub Pages sites (or the scripts folder itself). Never flip them private:
+#   Camping-app · Subscriptions · mac-scripts · Hours
+# (This script only creates NEW repos as private; ones that already have an
+#  origin are just pushed to, so their visibility is never touched.)
 
 # Junk that must never be committed. Build artefacts and secrets.
 IGNORE_ALWAYS=(

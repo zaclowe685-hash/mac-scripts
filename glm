@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+# glm — run Claude Code against Zac's Z.ai Coding Plan (GLM 5.3 / 5.3-Flash)
+#
+# IMPORTANT: ~/scripts is the PUBLIC mac-scripts repo.
+# This file must never contain the API key. It reads ~/.config/zai/key at runtime.
+#
+#   glm            flagship glm-5.3 on the main thread, glm-5.3-flash for the
+#                  cheap tier (file search, subagents, summarising, background work)
+#   glmflash       glm-5.3-flash everywhere — bulk/loop work, codemods, triage
+#   glm flash      same as glmflash
+#   glm peak       is the Coding Plan in its peak-rate window right now?
+#   glm check      preflight: DNS + key + a real API ping
+#
+# Anything after the mode is passed straight through to claude, e.g.
+#   glmflash -p "summarise every TODO in this repo"
+#
+# These set variables for THIS PROCESS ONLY. Plain `claude` still goes to
+# Anthropic on the normal subscription.
+
+set -euo pipefail
+
+BASE_URL="https://api.z.ai/api/anthropic"
+KEY_FILE="$HOME/.config/zai/key"
+BIG_MODEL="glm-5.3"
+FAST_MODEL="glm-5.3-flash"
+
+die() { printf '\033[31m%s\033[0m\n' "$*" >&2; exit 1; }
+note() { printf '\033[2m%s\033[0m\n' "$*" >&2; }
+
+# ---------------------------------------------------------------- preflight --
+
+check_dns() {
+  # The home router's DNS has been seen to SERVFAIL on api.z.ai (it is a CNAME
+  # into an Alibaba CDN). Fail loudly with the fix rather than a vague timeout.
+  if ! host api.z.ai >/dev/null 2>&1 && ! nslookup api.z.ai >/dev/null 2>&1; then
+    printf '\033[31mCannot resolve api.z.ai — your router DNS is failing on it.\033[0m\n' >&2
+    printf 'Fix it once with:\n\n    sudo networksetup -setdnsservers Wi-Fi 1.1.1.1 8.8.8.8\n\n' >&2
+    printf 'To go back to the router later:  sudo networksetup -setdnsservers Wi-Fi Empty\n' >&2
+    exit 1
+  fi
+}
+
+read_key() {
+  [ -f "$KEY_FILE" ] || die "No Z.ai key at $KEY_FILE — paste one via Ox Lab's KEYS button, or 'ox key'."
+  KEY="$(tr -d '[:space:]' < "$KEY_FILE")"
+  [ -n "$KEY" ] || die "$KEY_FILE is empty."
+}
+
+# ------------------------------------------------------------------- modes --
+
+# Peak window is Mon-Fri 14:00-18:00 Singapore time (UTC+8) = 06:00-10:00 UTC.
+peak_status() {
+  python3 - <<'PY'
+import datetime as dt
+now_utc = dt.datetime.now(dt.timezone.utc)
+sg  = now_utc.astimezone(dt.timezone(dt.timedelta(hours=8)))
+loc = now_utc.astimezone()
+peak = sg.weekday() < 5 and 14 <= sg.hour < 18
+print(f"Singapore : {sg:%a %d %b %H:%M}")
+print(f"Local     : {loc:%a %d %b %H:%M %Z}")
+print()
+print("\033[33mPEAK RATE\033[0m — credits burn at the full rate right now."
+      if peak else
+      "\033[32mOFF-PEAK\033[0m — the discounted credit rate applies right now.")
+print("(Peak = Mon-Fri 14:00-18:00 Singapore. Confirm the actual multipliers")
+print(" on your Z.ai dashboard — they are not published consistently.)")
+PY
+}
+
+run_check() {
+  check_dns
+  read_key
+  echo "Base URL : $BASE_URL"
+  echo "Key      : ${KEY:0:6}...${KEY: -4} (from $KEY_FILE)"
+  echo
+  for m in "$BIG_MODEL" "$FAST_MODEL"; do
+    printf '%-16s ' "$m"
+    code=$(curl -s -o /tmp/glm-check.$$ -w '%{http_code}' -m 60 \
+      "$BASE_URL/v1/messages" \
+      -H "Authorization: Bearer $KEY" \
+      -H "anthropic-version: 2023-06-01" \
+      -H "content-type: application/json" \
+      -d "{\"model\":\"$m\",\"max_tokens\":8,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}" \
+      || echo 000)
+    if [ "$code" = "200" ]; then
+      printf '\033[32mOK\033[0m\n'
+    else
+      printf '\033[31mHTTP %s\033[0m — %s\n' "$code" "$(head -c 200 /tmp/glm-check.$$ 2>/dev/null)"
+    fi
+    rm -f /tmp/glm-check.$$
+  done
+  echo
+  peak_status
+}
+
+launch() {
+  local main_model="$1"; shift
+  check_dns
+  read_key
+
+  # ANTHROPIC_API_KEY would take precedence and prompt for approval; the Z.ai
+  # endpoint is happy with a Bearer token, so use that and clear the other.
+  unset ANTHROPIC_API_KEY
+  export ANTHROPIC_BASE_URL="$BASE_URL"
+  export ANTHROPIC_AUTH_TOKEN="$KEY"
+
+  # Map every tier alias to a real GLM id so /model opus|sonnet|haiku all work.
+  # The haiku tier is the important one: Claude Code fires it constantly for
+  # file search, subagent dispatch, summarising and background context work.
+  export ANTHROPIC_DEFAULT_OPUS_MODEL="$BIG_MODEL"
+  export ANTHROPIC_DEFAULT_SONNET_MODEL="$BIG_MODEL"
+  export ANTHROPIC_DEFAULT_HAIKU_MODEL="$FAST_MODEL"
+  export ANTHROPIC_MODEL="$main_model"
+
+  note "GLM session — main thread: $main_model | cheap tier: $FAST_MODEL"
+  note "Nothing in this session bills to Anthropic. Plain 'claude' is unaffected."
+  exec claude "$@"
+}
+
+# ---------------------------------------------------------------- dispatch --
+
+case "$(basename "$0")" in
+  glmflash) launch "$FAST_MODEL" "$@" ;;
+esac
+
+case "${1:-}" in
+  flash)  shift; launch "$FAST_MODEL" "$@" ;;
+  peak)   peak_status ;;
+  check)  run_check ;;
+  -h|--help)
+    sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *)      launch "$BIG_MODEL" "$@" ;;
+esac
