@@ -28,6 +28,10 @@ PROJECTS=(
   streetball-pro streetball-raw subtracker taskify tower_defence vinterheim
   desmos-fourier model-mode voiceflow voidstrike xenathel "Space Journey"
   hours mystery bench thornbridge dynasty long-night court-legends
+  abandoned carve new-money npc-lab ox-lab-cloud ox-sims physarum
+  quant-bench qwen-local replyd sever shallows stream-watch terminus
+  throwdown-fable throwdown-glm ox-alpha-ideas game-plans hq-context
+  "Comparison 1" "Comparison 2"
 )
 
 # These repos are deliberately PUBLIC and must stay public — they are live
