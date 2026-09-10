@@ -27,11 +27,11 @@ PROJECTS=(
   maine-country morning-briefing project-hub redline scripts specimen streetball-mine
   streetball-pro streetball-raw subtracker taskify tower_defence vinterheim
   desmos-fourier model-mode voiceflow voidstrike xenathel "Space Journey"
-  hours mystery bench thornbridge dynasty long-night court-legends
+  hours mystery bench thornbridge dynasty long-night court-legends voice-lab breeze-lab
   abandoned carve new-money npc-lab ox-lab-cloud ox-sims physarum
   quant-bench qwen-local replyd sever shallows stream-watch terminus
   throwdown-fable throwdown-glm ox-alpha-ideas game-plans hq-context
-  "Comparison 1" "Comparison 2"
+  "Comparison 1" "Comparison 2" pull-up keyring navier-stokes
 )
 
 # These repos are deliberately PUBLIC and must stay public — they are live

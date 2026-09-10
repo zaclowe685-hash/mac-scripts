@@ -1,0 +1,39 @@
+#!/bin/bash
+# glm-run — open a visible Terminal window running Claude Code on GLM (Z.ai)
+# in a folder, with a prompt already sent. Used by the /glm skill.
+#
+#   glm-run <folder> <effort> <prompt-file>
+#
+#   folder       where the session works (created if missing)
+#   effort       low | medium | high | xhigh | max
+#   prompt-file  a text file holding the whole prompt
+#
+# The window is a real Terminal.app window, so Zac can watch and type into it.
+# No key lives here: ~/scripts/glm reads ~/.config/zai/key at run time.
+set -euo pipefail
+DIR="${1:?folder}"; EFFORT="${2:?effort}"; PF="${3:?prompt file}"
+DIR="${DIR/#\~/$HOME}"
+mkdir -p "$DIR"
+[ -s "$PF" ] || { echo "prompt file is empty: $PF" >&2; exit 1; }
+case "$EFFORT" in low|medium|high|xhigh|max) ;; *) echo "bad effort: $EFFORT" >&2; exit 1;; esac
+
+# Quote for the shell that Terminal will run.
+q() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
+# --add-dir "$HOME": the session lives in ~/glm but the projects live in ~/<name>,
+# so without this Claude Code asks "allowed to read outside the working
+# directory?" on the first file it touches. ~/glm/.claude/settings.json says
+# the same thing via additionalDirectories; this is the belt to that braces.
+# --add-dir is VARIADIC (it eats every following bare argument as a folder), so
+# it must come BEFORE another flag and never directly before the prompt —
+# 2026-09-04 it swallowed the prompt and the window sat idle.
+# glmflash (2026-09-05, Zac's call): GLM 5.3 Flash on every tier — he finds it
+# as good as the flagship for these jobs, and it is much cheaper and faster.
+CMD="cd $(q "$DIR") && clear && \"\$HOME/scripts/glmflash\" --add-dir \"\$HOME\" --effort $EFFORT --permission-mode auto \"\$(cat $(q "$PF"))\""
+
+osascript <<EOF
+tell application "Terminal"
+	activate
+	do script "$(printf '%s' "$CMD" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+end tell
+EOF
+echo "GLM window opened in $DIR (effort $EFFORT, prompt $PF)"

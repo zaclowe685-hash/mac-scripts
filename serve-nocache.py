@@ -21,6 +21,23 @@ class NoCacheHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header('Expires', '0')
         super().end_headers()
 
+    # Pretty routes, GitHub Pages style: a path that is not a file or folder
+    # serves the project's own `404.html` (if it has one) instead of the bare
+    # python error page, so e.g. Thornbridge can turn /meet/edward into
+    # /?meet=edward itself. Projects without a 404.html behave exactly as before.
+    def send_error(self, code, message=None, explain=None):
+        page = os.path.join(DIRECTORY, '404.html')
+        if code == 404 and os.path.isfile(page):
+            body = open(page, 'rb').read()
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            if self.command != 'HEAD':
+                self.wfile.write(body)
+            return
+        super().send_error(code, message, explain)
+
 
 NoCacheHandler.extensions_map.update({
     '.js': 'text/javascript',
