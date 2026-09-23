@@ -16,6 +16,9 @@ cd "$HOME" || exit 1
 
 # Every real project folder. Add new ones here (or let /new-project do it).
 PROJECTS=(
+  "northern-beaches"
+  "deck"
+  "physics-course"
   "grove"
   "night-shift"
   "payback"
@@ -31,7 +34,8 @@ PROJECTS=(
   abandoned carve new-money npc-lab ox-lab-cloud ox-sims physarum
   quant-bench qwen-local replyd sever shallows stream-watch terminus
   throwdown-fable throwdown-glm ox-alpha-ideas game-plans hq-context
-  "Comparison 1" "Comparison 2" pull-up keyring navier-stokes
+  "Comparison 1" "Comparison 2" pull-up keyring navier-stokes green-light snake-game
+  parle gapmap-bonsai silk vapour old-peninsula peninsula beacon car-kit
 )
 
 # These repos are deliberately PUBLIC and must stay public — they are live

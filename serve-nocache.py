@@ -5,7 +5,7 @@
 # fixed code look broken (SPECIMEN, forest-walk, etc.).
 #
 # Usage: python3 ~/scripts/serve-nocache.py <folder> <port>
-import http.server, socketserver, sys, functools, os
+import http.server, sys, functools, os
 
 if len(sys.argv) != 3:
     sys.exit("usage: serve-nocache.py <folder> <port>")
@@ -15,6 +15,10 @@ PORT = int(sys.argv[2])
 
 
 class NoCacheHandler(http.server.SimpleHTTPRequestHandler):
+    # Browsers can open connections before sending a request. Limit idle time,
+    # and serve connections independently so one cannot block the whole app.
+    timeout = 30
+
     def end_headers(self):
         self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
         self.send_header('Pragma', 'no-cache')
@@ -48,7 +52,6 @@ NoCacheHandler.extensions_map.update({
 })
 
 handler = functools.partial(NoCacheHandler, directory=DIRECTORY)
-socketserver.TCPServer.allow_reuse_address = True
-with socketserver.TCPServer(("", PORT), handler) as httpd:
+with http.server.ThreadingHTTPServer(("", PORT), handler) as httpd:
     print(f"Serving {DIRECTORY} at http://localhost:{PORT} (caching disabled)")
     httpd.serve_forever()
