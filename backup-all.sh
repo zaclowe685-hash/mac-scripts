@@ -34,7 +34,7 @@ PROJECTS=(
   abandoned carve new-money npc-lab ox-lab-cloud ox-sims physarum
   quant-bench qwen-local replyd sever shallows stream-watch terminus
   throwdown-fable throwdown-glm ox-alpha-ideas game-plans hq-context
-  "Comparison 1" "Comparison 2" pull-up keyring navier-stokes green-light snake-game
+  "Comparison 1" "Comparison 2" pull-up keyring navier-stokes green-light snake-game riftwake
   parle gapmap-bonsai silk vapour old-peninsula peninsula beacon car-kit
 )
 
