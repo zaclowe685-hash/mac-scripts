@@ -1,0 +1,16 @@
+#!/bin/zsh
+# blender: caps PENINSULA's Blender runs at 3 at once across every session (Zac, 2026-09-24; the Mac has 24 GB).
+# Sits ahead of /opt/homebrew/bin on PATH. Inside ~/peninsula* it waits for a slot in PENINSULA's own lock
+# (tools/blender/lock.sh, /tmp/peninsula-gpu). The lock's default callers use slots 1-2 and this uses 1-3, so the
+# total never passes 3. Anywhere else, or when lock.sh already launched us, it runs Blender straight away.
+#   blender-slots   →   ~/peninsula/tools/blender/lock.sh status
+
+REAL=/opt/homebrew/bin/blender
+LOCK=$HOME/peninsula/tools/blender/lock.sh
+
+parent=$(ps -o command= -p $PPID 2>/dev/null)
+if [[ "$PWD" != $HOME/peninsula* || "$parent" == *tools/blender/lock.sh* || ! -x "$LOCK" ]]; then
+  exec "$REAL" "$@"
+fi
+
+PENINSULA_GPU_SLOTS=3 exec "$LOCK" "$REAL" "$@"

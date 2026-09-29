@@ -1,0 +1,9 @@
+#!/bin/zsh
+# pen-progress: the current PENINSULA run's lanes, one line each (each session overwrites its own file).
+# Reads the evening run; `pen-progress day` reads the day run.
+run=${1:-evening}
+dir=~/game-plans/peninsula-$run
+files=( $dir/progress/*.txt(N) )
+(( ${#files} )) || echo "no progress lines yet ($dir)"
+for f in $files; do printf '%-12s %s\n' "${f:t:r}" "$(<$f)"; done
+for d in $dir/done/*(N); do echo "READY TO MERGE: ${d:t}"; done

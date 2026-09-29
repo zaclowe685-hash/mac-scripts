@@ -107,8 +107,8 @@ launch() {
   # Map every tier alias to a real GLM id so /model opus|sonnet|haiku all work.
   # The haiku tier is the important one: Claude Code fires it constantly for
   # file search, subagent dispatch, summarising and background context work.
-  export ANTHROPIC_DEFAULT_OPUS_MODEL="$BIG_MODEL"
-  export ANTHROPIC_DEFAULT_SONNET_MODEL="$BIG_MODEL"
+  export ANTHROPIC_DEFAULT_OPUS_MODEL="$main_model"
+  export ANTHROPIC_DEFAULT_SONNET_MODEL="$main_model"
   export ANTHROPIC_DEFAULT_HAIKU_MODEL="$FAST_MODEL"
   export ANTHROPIC_MODEL="$main_model"
 

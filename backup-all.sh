@@ -16,6 +16,7 @@ cd "$HOME" || exit 1
 
 # Every real project folder. Add new ones here (or let /new-project do it).
 PROJECTS=(
+  "overgrowth"
   "northern-beaches"
   "deck"
   "physics-course"
@@ -23,7 +24,6 @@ PROJECTS=(
   "night-shift"
   "payback"
   "ox-lab"
-  "stash"
   abyssal basketball-game camping-map chess_game court-1v1 crimson-moon
   deep-field dinner-planner earth-impact escape-rooms forest-walk gap-map
   glm-prompts hoopfeel house-walkthrough lumen meal-planner meridian

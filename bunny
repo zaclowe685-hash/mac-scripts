@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# bunny — run Claude Code with OpenRouter's free stealth model Space Bunny Alpha
+#
+# IMPORTANT: ~/scripts is the PUBLIC mac-scripts repo.
+# This file must never contain the API key. It reads it from KEYRING at runtime.
+#
+#   bunny          Claude Code in the current folder, Space Bunny on every tier
+#   bunny check    preflight: key + a real API ping
+#
+# Anything else is passed straight through to claude, e.g.
+#   bunny -p "summarise this repo"
+#
+# Stealth models LOG PROMPTS for training — only use it in folders with nothing
+# private in them. Plain `claude` still goes to Anthropic on the normal plan.
+
+set -euo pipefail
+
+BASE_URL="https://openrouter.ai/api"
+MODEL="stealth/space-bunny-alpha"
+
+die() { printf '\033[31m%s\033[0m\n' "$*" >&2; exit 1; }
+
+KEY="$(keyring get openrouter 2>/dev/null | tr -d '[:space:]')" || true
+[ -n "$KEY" ] || die "No OpenRouter key in KEYRING — run: keyring request \"OpenRouter\" --url https://openrouter.ai/keys"
+
+if [ "${1:-}" = "check" ]; then
+  printf 'Pinging %s ... ' "$MODEL"
+  out="$(curl -s -m 60 "$BASE_URL/v1/messages" \
+    -H "Authorization: Bearer $KEY" -H "content-type: application/json" \
+    -H "anthropic-version: 2023-06-01" \
+    -d "{\"model\":\"$MODEL\",\"max_tokens\":400,\"messages\":[{\"role\":\"user\",\"content\":\"Say: bunny ok\"}]}")"
+  echo "$out" | python3 -c "import json,sys; d=json.load(sys.stdin); t=[b.get('text','') for b in d.get('content',[]) if b.get('type')=='text']; print(' '.join(t) if t else d)"
+  exit 0
+fi
+
+# If this shell was started from inside another Claude Code session (e.g. the
+# desktop app opened the Terminal), it inherits that session's login plumbing and
+# claude would send the Claude login token to OpenRouter → 401. Strip it all.
+for v in $(env | cut -d= -f1 | grep -E '^(CLAUDE_CODE_|CLAUDECODE$|USE_[A-Z_]*OAUTH$|ANTHROPIC_)'); do unset "$v"; done
+
+export ANTHROPIC_BASE_URL="$BASE_URL"
+export ANTHROPIC_AUTH_TOKEN="$KEY"
+unset ANTHROPIC_API_KEY
+export ANTHROPIC_MODEL="$MODEL"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="$MODEL"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="$MODEL"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="$MODEL"
+export ANTHROPIC_SMALL_FAST_MODEL="$MODEL"
+export CLAUDE_CODE_SUBAGENT_MODEL="$MODEL"
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+export CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000
+export CLAUDE_CODE_MAX_RETRIES=20   # free stealth models drop connections; retry hard
+
+printf '\033[35m🐰 Space Bunny Alpha\033[0m  \033[2m(%s via OpenRouter, free, prompts are logged)\033[0m\n' "$MODEL"
+exec claude "$@"
