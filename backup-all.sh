@@ -16,6 +16,7 @@ cd "$HOME" || exit 1
 
 # Every real project folder. Add new ones here (or let /new-project do it).
 PROJECTS=(
+  "san-andreas"
   "overgrowth"
   "northern-beaches"
   "deck"
