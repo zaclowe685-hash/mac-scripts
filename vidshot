@@ -1,0 +1,15 @@
+#!/bin/zsh
+# vidshot — grab screenshots from an online video WITHOUT downloading it.
+# ffmpeg jumps straight to each timestamp in the stream and pulls one frame.
+# Usage: vidshot <url> <out-folder> <time> [time ...]     times: SS, MM:SS or HH:MM:SS
+set -e
+if (( $# < 3 )); then echo "usage: vidshot <url> <out-folder> <time> [time ...]"; exit 1; fi
+url=$1; out=$2; shift 2
+mkdir -p "$out"
+stream=$(yt-dlp -q --no-warnings -f 'bv*[height<=1080][ext=mp4]/bv*[height<=1080]/b' -g "$url" | head -1)
+i=1
+for t in "$@"; do
+  f="$out/$(printf %02d $i)-t${t//:/-}.jpg"
+  ffmpeg -hide_banner -loglevel error -ss "$t" -i "$stream" -frames:v 1 -q:v 2 -y "$f" && echo "$f"
+  (( i++ ))
+done
