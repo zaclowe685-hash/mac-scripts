@@ -4,12 +4,23 @@
 # (tools/blender/lock.sh, /tmp/peninsula-gpu). The lock's default callers use slots 1-2 and this uses 1-3, so the
 # total never passes 3. Anywhere else, or when lock.sh already launched us, it runs Blender straight away.
 #   blender-slots   →   ~/peninsula/tools/blender/lock.sh status
+# SAN ANDREAS (Zac, 2026-10-14): inside ~/san-andreas, at most 4 at once, in its own slots (/tmp/sa-blender), so
+# five overnight car lanes rendering together can't fill the 24 GB. Status:
+#   PENINSULA_GPU_SLOTS=4 PENINSULA_GPU_LOCK_DIR=/tmp/sa-blender ~/peninsula/tools/blender/lock.sh status
 
 REAL=/opt/homebrew/bin/blender
 LOCK=$HOME/peninsula/tools/blender/lock.sh
 
 parent=$(ps -o command= -p $PPID 2>/dev/null)
-if [[ "$PWD" != $HOME/peninsula* || "$parent" == *tools/blender/lock.sh* || ! -x "$LOCK" ]]; then
+if [[ "$parent" == *tools/blender/lock.sh* || ! -x "$LOCK" ]]; then
+  exec "$REAL" "$@"
+fi
+
+if [[ "$PWD" == $HOME/san-andreas* ]]; then
+  PENINSULA_GPU_SLOTS=4 PENINSULA_GPU_LOCK_DIR=/tmp/sa-blender exec "$LOCK" "$REAL" "$@"
+fi
+
+if [[ "$PWD" != $HOME/peninsula* ]]; then
   exec "$REAL" "$@"
 fi
 

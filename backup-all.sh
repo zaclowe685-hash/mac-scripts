@@ -16,7 +16,13 @@ cd "$HOME" || exit 1
 
 # Every real project folder. Add new ones here (or let /new-project do it).
 PROJECTS=(
+  "reno"
+  "tripo"
+  "swellhouse"
+  "recap"
+  "claude-mods"
   "subnortica"
+  "fablecraft"
   "yt-skip"
   "san-andreas"
   "overgrowth"
