@@ -1,0 +1,689 @@
+#!/usr/bin/env python3
+"""overnight — run a Claude job while Zac sleeps, and never stall on the usage limit.
+
+The no-token alarm clock. This script never thinks and uses no usage. It:
+  * starts one headless Claude session (`claude -p`) in a project folder, working a brief;
+  * when Claude stops at the 5-hour limit, reads the reset time from the error, waits,
+    then resumes THE SAME conversation ("the limit has reset, carry on") — no clicks;
+  * restarts Claude if it freezes, crashes, or stops early without finishing;
+  * stops at a deadline (default 06:00): one last "wrap up" turn, then a morning REPORT.md.
+
+Survives: Claude Desktop quitting (model mode closes it), this script crashing, a reboot
+(a launchd agent, com.zac.overnight, revives unfinished jobs every 2 minutes).
+
+    overnight start <project-folder> <brief.md> [--name N] [--until 06:00 | --hours 8]
+                    [--effort high] [--model claude-opus-5-5]
+    overnight status [name]        what every job is doing right now
+    overnight log <name>           its timeline
+    overnight stop <name>          stop it (Claude is stopped too)
+    overnight install              (re)install the launchd agent — `start` does this itself
+
+Each job lives in ~/.overnight/jobs/<name>/: BRIEF.md, PROGRESS.md (Claude's notes), DONE
+(Claude writes it when finished), REPORT.md (the morning summary), events.log, session.jsonl.
+Read ~/scripts/OVERNIGHT.md for how and why.
+"""
+import fcntl, json, os, re, shutil, signal, subprocess, sys, time, traceback
+from datetime import datetime, timedelta
+from pathlib import Path
+
+HOME = Path(os.environ.get('OVERNIGHT_HOME', Path.home() / '.overnight'))
+JOBS = HOME / 'jobs'
+SELF = Path(__file__).resolve()
+LABEL = 'com.zac.overnight'
+PLIST = Path.home() / 'Library/LaunchAgents' / f'{LABEL}.plist'
+
+ENV = os.environ.get
+TICK = float(ENV('OVERNIGHT_TICK', 15))
+HOLD_SECS = float(ENV('OVERNIGHT_HOLD_SECS', 600))        # wait after a limit when no reset time is given
+SILENT_MINS = float(ENV('OVERNIGHT_SILENT_MINS', 30))     # no output this long = frozen (a Bash step maxes at 10 min)
+RETRY_LOOP_SECS = float(ENV('OVERNIGHT_RETRY_LOOP_SECS', 240))  # stuck retrying a limit/overload this long = limited
+QUICK_EXIT_SECS = float(ENV('OVERNIGHT_QUICK_EXIT_SECS', 180))  # died this fast with no clean end = limit
+GRACE_MINS = float(ENV('OVERNIGHT_GRACE_MINS', 30))       # a turn still running at the deadline gets this long
+WRAPUP_MINS = float(ENV('OVERNIGHT_WRAPUP_MINS', 20))     # the final wrap-up turn gets this long
+MAX_NUDGES = int(ENV('OVERNIGHT_MAX_NUDGES', 30))         # "keep going" prompts before giving up
+STUCK_RUN_SECS = float(ENV('OVERNIGHT_STUCK_RUN_SECS', 120))
+MAX_CRASHES = int(ENV('OVERNIGHT_MAX_CRASHES', 8))
+NO_LAUNCHD = bool(ENV('OVERNIGHT_NO_LAUNCHD'))
+RESET_PAD = timedelta(seconds=float(ENV('OVERNIGHT_RESET_PAD_SECS', 60)))
+
+LIMIT_RE = re.compile(r'usage limit|session limit|weekly limit|hit your [a-z ]*limit|limit reached|'
+                      r'rate.?limit|overloaded|"status":\s*(429|529)|\b529\b|\b429\b', re.I)
+WEEKLY_RE = re.compile(r'weekly limit|week', re.I)
+LOST_RE = re.compile(r'no conversation found|session .*not found|could not find (session|conversation)', re.I)
+ACTIVE = ('starting', 'running', 'holding')
+
+
+def now():
+    return datetime.now()
+
+
+def load(p, default):
+    try:
+        return json.loads(Path(p).read_text())
+    except Exception:
+        return default
+
+
+def save(p, data):
+    tmp = Path(str(p) + '.tmp')
+    tmp.write_text(json.dumps(data, indent=2))
+    tmp.replace(p)
+
+
+def tail(path, n=12000):
+    try:
+        with open(path, 'rb') as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - n))
+            return f.read().decode('utf8', 'replace')
+    except Exception:
+        return ''
+
+
+def notify(title, text):
+    if NO_LAUNCHD:
+        return
+    try:
+        subprocess.run(['osascript', '-e', f'display notification {json.dumps(text)} with title {json.dumps(title)}'],
+                       timeout=10, capture_output=True)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------- reading Claude's log
+
+def run_lines(logf):
+    """Lines of the CURRENT run only (after the last 'launch' marker this script wrote)."""
+    t = tail(logf, 40000)
+    i = t.rfind('"overnight": "launch"')
+    if i >= 0:
+        t = t[t.find('\n', i) + 1:]
+    return t.splitlines()
+
+
+def status_lines(lines):
+    """Only lines Claude Code itself wrote about the run — never file contents Claude read or its own words."""
+    out = []
+    for l in lines:
+        if not l.startswith('{'):
+            out.append(l)  # plain stderr
+        elif re.search(r'"type":\s*"(user|assistant)"', l[:300]):
+            continue
+        elif re.search(r'"type":\s*"result"|"is_error":\s*true|"subtype":\s*"api_retry"|api_error|"error"', l):
+            out.append(l)
+    return out
+
+
+def session_id(lines):
+    sid = None
+    for l in lines:
+        if '"session_id"' in l and '"system"' in l:
+            try:
+                o = json.loads(l)
+                if o.get('type') == 'system' and o.get('session_id'):
+                    sid = o['session_id']
+            except Exception:
+                pass
+    return sid
+
+
+# Claude Code's own limit notices START like this; Claude's normal summaries don't
+LIMIT_RESULT_RE = re.compile(r"^\W*(claude ai usage limit reached|you'?ve (hit|reached) your|you have (hit|reached) your|"
+                             r"[a-z ]*limit reached\|\d{10}|(5-hour|session|usage|weekly) limit (reached|hit))", re.I)
+
+
+def clean_end(lines):
+    """The run's last result says it finished normally (and isn't a short 'you hit your limit' notice)."""
+    for l in reversed(lines):
+        if re.search(r'"type":\s*"result"', l):
+            try:
+                o = json.loads(l)
+            except Exception:
+                return False
+            text = str(o.get('result', ''))
+            return o.get('is_error') is False and not (len(text) < 300 and LIMIT_RESULT_RE.search(text))
+    return False
+
+
+def limit_text(lines):
+    """The limit/overload message of this run, if any."""
+    st = status_lines(lines)[-8:]
+    for l in reversed(st):
+        if LIMIT_RE.search(l):
+            return l
+    return None
+
+
+def reset_time(text):
+    """When the limit resets, from Claude's message. Returns (datetime | None, weekly: bool)."""
+    if not text:
+        return None, False
+    m = re.search(r'limit reached\|(\d{10})', text)
+    if m:
+        t = datetime.fromtimestamp(int(m.group(1))) + RESET_PAD
+        return t, t - now() > timedelta(hours=6)
+    # "resets Oct 22, 5am" / "resets Wed 5am" -> a day name or date before the time = weekly
+    if re.search(r'resets\s+(on\s+)?(mon|tue|wed|thu|fri|sat|sun|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)', text, re.I):
+        return None, True
+    m = re.search(r'resets\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)', text, re.I)
+    if not m:
+        return None, bool(re.search(r'weekly limit', text, re.I))
+    h, mi, ap = int(m.group(1)) % 12, int(m.group(2) or 0), m.group(3).lower()
+    t = now().replace(hour=h + (12 if ap == 'pm' else 0), minute=mi, second=0, microsecond=0)
+    if t <= now() - timedelta(minutes=5):
+        t += timedelta(days=1)
+    weekly = bool(re.search(r'weekly limit', text, re.I))
+    return t + RESET_PAD, weekly
+
+
+# ---------------------------------------------------------------- the job
+
+PROMPT_FIRST = """You are working UNATTENDED overnight on a job for Zac. He is asleep and nobody will read or answer you until morning.
+
+Your brief: {brief} — read it in full first. Work in this folder: {project}
+
+Rules for the night:
+- Never ask questions or wait for approval. Make the sensible call yourself and write it down in PROGRESS.
+- Keep {progress} up to date after every chunk of work: what is done, what is next, decisions you made. If you are restarted from scratch, that file is how you carry on.
+- You can be stopped at ANY moment by the usage limit and resumed later in this same conversation. That is normal. Keep the work in a state you can pick up again.
+- If the folder is a git repo, commit at every working milestone. Never push, deploy, publish, send messages or spend money unless the brief explicitly says to.
+- Do not use subagents. Do not start anything that runs forever in the foreground (servers go in the background).
+- Stop starting big new pieces near {until}; the night ends then.
+- When EVERY part of the brief is finished and checked, write {done} containing a short summary for Zac (what got done, what didn't, anything he must check). Never write it early: writing it ends the night."""
+
+PROMPT_LIMIT = ('The usage limit has reset. Carry on with the brief exactly where you stopped (check {progress} '
+                'and git status first if you are unsure). Remember: when everything is finished, write {done}.')
+PROMPT_NUDGE = ('Zac is asleep, so nobody will answer: keep going on the brief ({brief}). If you were waiting on a '
+                'question, make the sensible call yourself and note it in {progress}. If EVERY part of the brief is '
+                'truly finished and checked, write {done} with the summary now. Otherwise carry on.')
+PROMPT_CRASH = ('Your last run stopped unexpectedly. Carry on with the brief ({brief}) from where you were — check '
+                '{progress} and git status first. When everything is finished, write {done}.')
+PROMPT_FRESH = ('(An earlier session on this job was lost. Before doing anything, read {progress} and check git log / '
+                'git status to see what is already done, then carry on from there.)\n\n')
+PROMPT_WRAPUP = ('TIME IS UP — it is past {until}. In the next few minutes: finish or safely park what you are doing, '
+                 'commit what works, update {progress}, then write {done} with the summary for Zac, including what '
+                 'is NOT finished. Start nothing new.')
+
+
+class Job:
+    def __init__(self, name):
+        self.name = name
+        self.dir = JOBS / name
+        self.cfg = load(self.dir / 'job.json', None)
+        if self.cfg is None:
+            raise SystemExit(f'no job called {name!r} (see: overnight status)')
+        self.st = load(self.dir / 'state.json', {})
+        self.logf = self.dir / 'session.jsonl'
+
+    # paths Claude is told about
+    @property
+    def paths(self):
+        return dict(brief=self.dir / 'BRIEF.md', progress=self.dir / 'PROGRESS.md', done=self.dir / 'DONE',
+                    project=self.cfg['project'], until=self.deadline.strftime('%H:%M'))
+
+    @property
+    def deadline(self):
+        return datetime.fromisoformat(self.cfg['until'])
+
+    def persist(self):
+        save(self.dir / 'state.json', self.st)
+
+    def event(self, msg):
+        line = f'{now():%a %H:%M:%S}  {msg}'
+        with open(self.dir / 'events.log', 'a') as f:
+            f.write(line + '\n')
+        if ENV('OVERNIGHT_VERBOSE'):
+            print(f'[{self.name}] {line}', flush=True)
+
+    # -------------------------------------------------- claude process
+    def claude_alive(self):
+        pid = self.st.get('pid')
+        if not pid:
+            return False
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        try:
+            r, _ = os.waitpid(pid, os.WNOHANG)  # reap our own zombie child
+            if r == pid:
+                return False
+        except ChildProcessError:
+            pass
+        # pid reuse guard: it must still be the process we started
+        try:
+            cmd = subprocess.run(['ps', '-p', str(pid), '-o', 'command='], capture_output=True, text=True).stdout
+        except Exception:
+            return True
+        return str(self.dir) in cmd or Path(self.cfg['claude']).name in cmd
+
+    def kill_claude(self, why):
+        pid = self.st.get('pid')
+        if not pid:
+            return
+        self.event(f'stopping Claude ({why})')
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(pid, sig)
+            except Exception:
+                try:
+                    os.kill(pid, sig)
+                except Exception:
+                    pass
+            for _ in range(20):
+                if not self.claude_alive():
+                    return
+                time.sleep(0.5)
+
+    def launch(self, prompt, resume):
+        cmd = [self.cfg['claude'], '-p', prompt, '--model', self.cfg['model'], '--effort', self.cfg['effort'],
+               '--dangerously-skip-permissions', '--output-format', 'stream-json', '--verbose',
+               '--disallowedTools', 'Agent', 'Task', 'Workflow', 'AskUserQuestion']
+        if resume:
+            cmd += ['--resume', resume]
+        with open(self.logf, 'a') as out:
+            out.write(json.dumps({'overnight': 'launch', 'at': now().isoformat(), 'resume': resume,
+                                  'prompt': prompt[:200]}) + '\n')
+        out = open(self.logf, 'a')
+        env = dict(os.environ, OVERNIGHT_JOB_DIR=str(self.dir))
+        env['PATH'] = self.cfg.get('path') or env.get('PATH', '')
+        p = subprocess.Popen(cmd, cwd=self.cfg['project'], stdout=out, stderr=subprocess.STDOUT,
+                             stdin=subprocess.DEVNULL, start_new_session=True, env=env)
+        out.close()
+        self.st.update(pid=p.pid, run_started=now().isoformat(), retry_seen=None, run_kind=self.st.get('next_kind'))
+        self.st['runs'] = self.st.get('runs', 0) + 1
+        self.st['status'] = 'running'
+        self.persist()
+
+    def run_secs(self):
+        try:
+            return (now() - datetime.fromisoformat(self.st['run_started'])).total_seconds()
+        except Exception:
+            return 0
+
+    # -------------------------------------------------- one supervisor tick
+    def finish(self, reason):
+        if self.claude_alive():
+            self.kill_claude('the night is over')
+        self.st['status'] = 'finished' if reason != 'stopped by you' else 'stopped'
+        self.st['end_reason'] = reason
+        self.st['ended'] = now().isoformat()
+        self.st['pid'] = None
+        self.persist()
+        self.event(f'NIGHT OVER: {reason}')
+        self.write_report()
+        notify('Overnight job finished', f'{self.name}: {reason}')
+
+    def tick(self):
+        st = self.st
+        done = (self.dir / 'DONE').exists()
+        if (self.dir / 'STOP').exists():
+            return self.finish('stopped by you')
+
+        if self.claude_alive():
+            lines = run_lines(self.logf)
+            st['sid'] = session_id(lines) or st.get('sid')
+            silent = (time.time() - os.path.getmtime(self.logf)) / 60 if self.logf.exists() else 0
+            lim = limit_text(lines[-6:]) if lines else None
+            if lim and re.search(r'api_retry|"is_error":\s*true', lim):
+                st['retry_seen'] = st.get('retry_seen') or now().isoformat()
+                if (now() - datetime.fromisoformat(st['retry_seen'])).total_seconds() > RETRY_LOOP_SECS:
+                    st['forced'] = 'limited'
+                    self.kill_claude('stuck retrying at the usage limit')
+            else:
+                st['retry_seen'] = None
+            if silent > SILENT_MINS:
+                st['forced'] = 'limited' if lim else 'frozen'
+                self.kill_claude(f'no output for {silent:.0f} min')
+            elif st.get('run_kind') == 'wrapup' and self.run_secs() > WRAPUP_MINS * 60:
+                self.kill_claude('wrap-up ran over time')
+            elif now() > self.deadline + timedelta(minutes=GRACE_MINS) and st.get('run_kind') != 'wrapup':
+                st['forced'] = 'deadline'
+                self.kill_claude(f'still going {GRACE_MINS:.0f} min after the deadline')
+            self.persist()
+            return
+
+        # ---- Claude is not running: what happened to the last run?
+        if st.get('pid'):
+            self.classify_finished_run(done)
+            if st.get('status') in ('finished', 'stopped'):
+                return
+
+        if done:
+            return self.finish('done — Claude finished the brief')
+
+        if st.get('hold_until'):
+            if now() < datetime.fromisoformat(st['hold_until']):
+                return
+            self.event('limit hold over: resuming')
+            st['hold_until'] = None
+            st['status'] = 'running'
+
+        past = now() >= self.deadline
+        if past:
+            if st.get('wrapup_sent') or not st.get('sid') or now() > self.deadline + timedelta(hours=1):
+                return self.finish(st.get('pending_reason') or 'time up')
+            st['wrapup_sent'] = True
+            st['next_kind'] = 'wrapup'
+            self.event('deadline reached: asking Claude to wrap up')
+            return self.launch(PROMPT_WRAPUP.format(**self.paths), st['sid'])
+
+        kind = st.get('next_kind') or 'first'
+        p = self.paths
+        if not st.get('sid'):
+            prompt = (PROMPT_FRESH.format(**p) if st.get('runs') else '') + PROMPT_FIRST.format(**p)
+            self.event('starting Claude' + (' (fresh session)' if st.get('runs') else ''))
+            return self.launch(prompt, None)
+        prompt = {'limit': PROMPT_LIMIT, 'nudge': PROMPT_NUDGE, 'crash': PROMPT_CRASH}.get(kind, PROMPT_CRASH)
+        self.event(f'resuming Claude ({kind})')
+        self.launch(prompt.format(**p), st['sid'])
+
+    def classify_finished_run(self, done):
+        st = self.st
+        lines = run_lines(self.logf)
+        st['sid'] = session_id(lines) or st.get('sid')
+        secs = self.run_secs()
+        forced = st.pop('forced', None)
+        kind = st.get('run_kind')
+        st['pid'] = None
+        st.pop('pending_reason', None)
+        self.persist()
+        if done:
+            return
+        lim = limit_text(lines)
+        clean = clean_end(lines)
+        if kind == 'wrapup':
+            if lim:
+                st['pending_reason'] = 'time up (the usage limit hit during the wrap-up)'
+            return
+        if forced == 'deadline':
+            return
+        if not clean and any(LOST_RE.search(l) for l in status_lines(lines)[-6:]):
+            self.event('Claude could not find its old conversation: starting a fresh session that reads PROGRESS.md')
+            st['sid'] = None
+            return
+        if forced == 'limited' or (not clean and (lim or secs < QUICK_EXIT_SECS)):
+            when, weekly = reset_time(lim)
+            why = (lim or '').strip()[:160] if lim else 'quit within minutes with no answer (treated as the limit)'
+            if weekly or (when and when > self.deadline):
+                st['pending_reason'] = ('the WEEKLY usage limit hit — it does not reset before the deadline'
+                                        if weekly else f'usage limit hit and it only resets at {when:%a %H:%M}, after the deadline')
+                self.event(f'LIMIT: {why}')
+                return self.finish(st['pending_reason'])
+            until = when or now() + timedelta(seconds=HOLD_SECS)
+            st['hold_until'] = until.isoformat()
+            st['status'] = 'holding'
+            st['next_kind'] = 'limit'
+            st['limits'] = st.get('limits', 0) + 1
+            st['crash_streak'] = 0
+            self.event(f'LIMIT: {why} — waiting until {until:%H:%M:%S}' + ('' if when else ' (no reset time given; will retry)'))
+        elif forced == 'frozen' or not clean:
+            st['crashes'] = st.get('crashes', 0) + 1
+            st['next_kind'] = 'crash'
+            self.event(f'Claude stopped unexpectedly after {secs / 60:.0f} min (crash {st["crashes"]}/{MAX_CRASHES})')
+            if st['crashes'] > MAX_CRASHES:
+                return self.finish('Claude kept crashing — see session.jsonl')
+        else:
+            st['nudges'] = st.get('nudges', 0) + 1
+            st['quick_nudges'] = st.get('quick_nudges', 0) + 1 if secs < STUCK_RUN_SECS else 0
+            self.event(f'Claude ended its turn without finishing (nudge {st["nudges"]}/{MAX_NUDGES})')
+            if st['quick_nudges'] >= 3:
+                return self.finish('Claude kept stopping straight away without finishing — it may be stuck or think it is done (see PROGRESS.md)')
+            if st['nudges'] > MAX_NUDGES:
+                return self.finish('Claude kept stopping without finishing — see PROGRESS.md')
+            st['next_kind'] = 'nudge'
+        self.persist()
+
+    # -------------------------------------------------- report
+    def write_report(self):
+        p = self.dir
+        started = datetime.fromisoformat(self.st.get('started', self.cfg['created']))
+        commits = ''
+        try:
+            commits = subprocess.run(['git', '-C', self.cfg['project'], 'log', '--oneline',
+                                      f'--since={started.isoformat()}'], capture_output=True, text=True,
+                                     timeout=20).stdout.strip()
+        except Exception:
+            pass
+        done = (p / 'DONE').read_text().strip() if (p / 'DONE').exists() else '(Claude did not write a summary.)'
+        events = (p / 'events.log').read_text() if (p / 'events.log').exists() else ''
+        r = [f'# Overnight report — {self.name}', '',
+             f'**How it ended:** {self.st.get("end_reason", "?")}', '',
+             f'- Project: `{self.cfg["project"]}`',
+             f'- Ran {started:%a %H:%M} → {now():%a %H:%M} · Claude runs: {self.st.get("runs", 0)} · '
+             f'usage-limit waits: {self.st.get("limits", 0)} · nudges: {self.st.get("nudges", 0)} · '
+             f'crashes: {self.st.get("crashes", 0)}', '',
+             "## Claude's summary", '', done, '',
+             '## Commits made tonight', '', '```', commits or '(none)', '```', '',
+             '## Timeline', '', '```', events.strip(), '```', '',
+             f'Progress notes: `{p / "PROGRESS.md"}` · full log: `{self.logf}`', '']
+        (p / 'REPORT.md').write_text('\n'.join(r))
+
+
+# ---------------------------------------------------------------- supervisor (one per job)
+
+def supervise(name):
+    job_dir = JOBS / name
+    lock = open(job_dir / 'supervisor.lock', 'a+')
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return  # another supervisor already has this job
+    # keep the Mac awake for exactly as long as this supervisor lives
+    if not NO_LAUNCHD and shutil.which('caffeinate'):
+        subprocess.Popen(['caffeinate', '-dimsu', '-w', str(os.getpid())], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    j = Job(name)
+    j.st['sup_pid'] = os.getpid()
+    j.st.setdefault('started', now().isoformat())
+    j.persist()
+    j.event(f'supervisor up (pid {os.getpid()})' + (' — took over a running Claude' if j.claude_alive() else ''))
+    while True:
+        try:
+            j.st = load(j.dir / 'state.json', j.st)
+            j.tick()
+            if j.st.get('status') in ('finished', 'stopped'):
+                return
+        except Exception:
+            j.event('supervisor error (carrying on): ' + traceback.format_exc().strip().splitlines()[-1])
+            with open(j.dir / 'supervisor-errors.log', 'a') as f:
+                f.write(f'--- {now()}\n{traceback.format_exc()}\n')
+        time.sleep(TICK)
+
+
+def supervisor_running(name):
+    try:
+        with open(JOBS / name / 'supervisor.lock', 'a+') as f:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(f, fcntl.LOCK_UN)
+            return False
+    except OSError:
+        return True
+
+
+def spawn_supervisor(name):
+    out = open(JOBS / name / 'supervisor.out', 'a')
+    subprocess.Popen([sys.executable, str(SELF), '_supervise', name], stdout=out, stderr=subprocess.STDOUT,
+                     stdin=subprocess.DEVNULL, start_new_session=True)
+
+
+def revive():
+    """Run by launchd every 2 minutes and at login: restart the supervisor of any unfinished job."""
+    if not JOBS.exists():
+        return
+    for d in sorted(JOBS.iterdir()):
+        st = load(d / 'state.json', {})
+        if st.get('status') in ACTIVE and (d / 'job.json').exists() and not supervisor_running(d.name):
+            with open(d / 'events.log', 'a') as f:
+                f.write(f'{now():%a %H:%M:%S}  supervisor was not running: reviving it\n')
+            spawn_supervisor(d.name)
+
+
+# ---------------------------------------------------------------- launchd agent
+
+def install():
+    PLIST.parent.mkdir(parents=True, exist_ok=True)
+    HOME.mkdir(parents=True, exist_ok=True)
+    plist = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>{LABEL}</string>
+  <key>ProgramArguments</key><array>
+    <string>/usr/bin/python3</string><string>{SELF}</string><string>revive</string>
+  </array>
+  <key>EnvironmentVariables</key><dict><key>PATH</key><string>{os.environ.get('PATH', '')}</string></dict>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>120</integer>
+  <key>AbandonProcessGroup</key><true/>
+  <key>StandardOutPath</key><string>{HOME / 'launchd.log'}</string>
+  <key>StandardErrorPath</key><string>{HOME / 'launchd.log'}</string>
+</dict></plist>
+"""
+    if not PLIST.exists() or PLIST.read_text() != plist:
+        PLIST.write_text(plist)
+        subprocess.run(['launchctl', 'bootout', f'gui/{os.getuid()}/{LABEL}'], capture_output=True)
+    r = subprocess.run(['launchctl', 'print', f'gui/{os.getuid()}/{LABEL}'], capture_output=True)
+    if r.returncode != 0:
+        subprocess.run(['launchctl', 'bootstrap', f'gui/{os.getuid()}', str(PLIST)], capture_output=True)
+    return subprocess.run(['launchctl', 'print', f'gui/{os.getuid()}/{LABEL}'], capture_output=True).returncode == 0
+
+
+# ---------------------------------------------------------------- commands
+
+def parse_until(until, hours):
+    t = now()
+    if hours:
+        return t + timedelta(hours=float(hours))
+    h, m = (int(x) for x in (until or '06:00').split(':'))
+    d = t.replace(hour=h, minute=m, second=0, microsecond=0)
+    if d <= t:
+        d += timedelta(days=1)
+    return d
+
+
+def cmd_start(args):
+    import argparse
+    ap = argparse.ArgumentParser(prog='overnight start')
+    ap.add_argument('project')
+    ap.add_argument('brief')
+    ap.add_argument('--name')
+    ap.add_argument('--until', help='HH:MM, default 06:00')
+    ap.add_argument('--hours', type=float)
+    ap.add_argument('--seconds', type=float, help=argparse.SUPPRESS)  # tests
+    ap.add_argument('--effort', default='high', choices=['low', 'medium', 'high', 'xhigh', 'max'])
+    ap.add_argument('--model', default='claude-opus-5-5')
+    a = ap.parse_args(args)
+    project = Path(a.project).expanduser().resolve()
+    brief = Path(a.brief).expanduser().resolve()
+    if not project.is_dir():
+        sys.exit(f'project folder not found: {project}')
+    if not brief.is_file():
+        sys.exit(f'brief not found: {brief}')
+    claude = ENV('CLAUDE_BIN') or shutil.which('claude') or str(Path.home() / '.npm-global/bin/claude')
+    if not Path(claude).exists():
+        sys.exit(f'claude command not found ({claude})')
+    if not ENV('OVERNIGHT_SKIP_PREFLIGHT'):
+        # catch a broken setup (login, model name, flags) now, while Zac is still awake
+        print('checking Claude works (a few seconds)...', flush=True)
+        try:
+            r = subprocess.run([claude, '-p', 'Reply with just: OK', '--model', a.model, '--effort', 'low',
+                                '--output-format', 'json'], capture_output=True, text=True, timeout=180,
+                               cwd=str(project), stdin=subprocess.DEVNULL)
+            out = (r.stdout + r.stderr).strip()
+        except subprocess.TimeoutExpired:
+            out, r = 'timed out', None
+        if LIMIT_RE.search(out):
+            when, weekly = reset_time(out)
+            print('  you are AT the usage limit right now' + (f' (resets {when:%a %H:%M})' if when else '') +
+                  ' — the job will wait for it, then start.' + (' WEEKLY limit: it will not run tonight.' if weekly else ''))
+        elif r is None or r.returncode != 0 or '"is_error":true' in out.replace(' ', ''):
+            sys.exit(f'Claude is not working, so the job was NOT started:\n  {out[-600:]}')
+    name = re.sub(r'[^a-z0-9-]+', '-', (a.name or f'{project.name}-{now():%m%d-%H%M}').lower()).strip('-')
+    d = JOBS / name
+    if d.exists() and load(d / 'state.json', {}).get('status') in ACTIVE:
+        sys.exit(f'a job called {name} is already running (overnight status {name})')
+    if d.exists():
+        shutil.rmtree(d)
+    d.mkdir(parents=True)
+    shutil.copy(brief, d / 'BRIEF.md')
+    until = now() + timedelta(seconds=a.seconds) if a.seconds else parse_until(a.until, a.hours)
+    save(d / 'job.json', dict(name=name, project=str(project), brief_source=str(brief), until=until.isoformat(),
+                              effort=a.effort, model=a.model, claude=claude, path=os.environ.get('PATH', ''),
+                              created=now().isoformat()))
+    (d / 'PROGRESS.md').write_text(f'# Progress — {name}\n\n(Claude keeps this up to date during the night.)\n')
+    save(d / 'state.json', {'status': 'starting'})
+    warnings = []
+    if not NO_LAUNCHD:
+        if not install():
+            warnings.append('could not load the launchd agent — the job runs, but will not survive a reboot')
+        try:
+            batt = subprocess.run(['pmset', '-g', 'batt'], capture_output=True, text=True).stdout
+            if 'AC Power' not in batt:
+                warnings.append('the Mac is on BATTERY — plug it in or it may die overnight')
+        except Exception:
+            pass
+    spawn_supervisor(name)
+    time.sleep(1.5)
+    print(f'overnight job "{name}" started — stops at {until:%a %H:%M}.')
+    print(f'  check:  overnight status {name}')
+    print(f'  stop:   overnight stop {name}')
+    print(f'  report: {d / "REPORT.md"} (written when it ends)')
+    print('  keep the lid OPEN and the charger in (a closed lid sleeps the Mac whatever we do).')
+    for w in warnings:
+        print('  WARNING: ' + w)
+
+
+def describe(name):
+    j = Job(name)
+    st = j.st
+    s = st.get('status', '?')
+    bits = [f'{name}: {s.upper()}']
+    if s == 'holding' and st.get('hold_until'):
+        bits.append(f'waiting for the usage limit to reset at {datetime.fromisoformat(st["hold_until"]):%H:%M}')
+    if s in ACTIVE:
+        bits.append(f'deadline {j.deadline:%a %H:%M}')
+        if not supervisor_running(name):
+            bits.append('(supervisor not running — launchd revives it within 2 min)')
+    if st.get('end_reason'):
+        bits.append(st['end_reason'])
+    bits.append(f'runs {st.get("runs", 0)}, limit waits {st.get("limits", 0)}')
+    last = (j.dir / 'events.log').read_text().strip().splitlines()[-1:] if (j.dir / 'events.log').exists() else []
+    out = ' · '.join(bits)
+    if last:
+        out += f'\n    last: {last[0]}'
+    if s in ('finished', 'stopped'):
+        out += f'\n    report: {j.dir / "REPORT.md"}'
+    return out
+
+
+def main():
+    a = sys.argv[1:]
+    c = a[0] if a else 'help'
+    if c == 'start':
+        cmd_start(a[1:])
+    elif c == '_supervise':
+        supervise(a[1])
+    elif c == 'revive':
+        revive()
+    elif c == 'install':
+        print('launchd agent loaded' if install() else 'FAILED to load the launchd agent')
+    elif c == 'status':
+        names = a[1:] or sorted((p.name for p in JOBS.iterdir() if (p / 'job.json').exists()),
+                                key=lambda n: (JOBS / n / 'job.json').stat().st_mtime)[-8:] if JOBS.exists() else []
+        print('\n'.join(describe(n) for n in names) if names else 'no overnight jobs yet')
+    elif c == 'log':
+        print((JOBS / a[1] / 'events.log').read_text() if len(a) > 1 else 'usage: overnight log <name>')
+    elif c == 'stop':
+        if len(a) < 2:
+            sys.exit('usage: overnight stop <name>')
+        Job(a[1])
+        (JOBS / a[1] / 'STOP').write_text(now().isoformat())
+        if not supervisor_running(a[1]):
+            spawn_supervisor(a[1])
+        print(f'stopping {a[1]} (within {TICK:.0f} s)')
+    else:
+        print(__doc__)
+
+
+if __name__ == '__main__':
+    main()
