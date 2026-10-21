@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""window-pinger — starts a new 5-hour Claude window the moment the old one resets.
+
+Run by launchd (com.zac.window-pinger) every 2 minutes. Each run reads Claude's
+usage page (free, no tokens). If no 5-hour window is running, it sends one tiny
+Haiku "Reply OK" so the next 5-hour clock starts straight away.
+Switches itself off after DEADLINE (the Thu 22 Oct 4pm weekly reset).
+
+  window-pinger           one check (what launchd runs)
+  window-pinger status    show the window + last pings
+"""
+import json, os, subprocess, sys, urllib.request
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+DEADLINE = datetime(2026, 10, 22, 16, 0).astimezone()      # Thu 4pm Sydney
+CLAUDE = str(Path.home() / '.npm-global/bin/claude')
+LOG = Path.home() / 'scripts/logs/window-pinger.log'
+STATE = Path.home() / '.window-pinger/state.json'
+WORKDIR = Path.home() / '.window-pinger'                    # empty folder, so the ping loads no project files
+LABEL = 'com.zac.window-pinger'
+MIN_GAP = timedelta(minutes=10)                             # never ping twice within this
+
+
+def now():
+    return datetime.now().astimezone()
+
+
+def log(msg):
+    LOG.parent.mkdir(parents=True, exist_ok=True)
+    with LOG.open('a') as f:
+        f.write(f'{now():%a %d %b %H:%M:%S}  {msg}\n')
+
+
+def notify(msg):
+    subprocess.run(['osascript', '-e', f'display notification "{msg}" with title "Window pinger"'],
+                   capture_output=True)
+
+
+def load_state():
+    try:
+        return json.loads(STATE.read_text())
+    except Exception:
+        return {}
+
+
+def save_state(st):
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    STATE.write_text(json.dumps(st, indent=1))
+
+
+def usage():
+    """The five_hour block from Claude's usage page, or None if it can't be read."""
+    try:
+        raw = subprocess.run(['security', 'find-generic-password', '-s', 'Claude Code-credentials', '-w'],
+                             capture_output=True, text=True, timeout=10).stdout
+        tok = json.loads(raw)['claudeAiOauth']['accessToken']
+        req = urllib.request.Request('https://api.anthropic.com/api/oauth/usage', headers={
+            'Authorization': f'Bearer {tok}', 'anthropic-beta': 'oauth-2025-04-20'})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return json.load(r).get('five_hour') or {}
+    except Exception as e:
+        log(f'could not read usage ({type(e).__name__}: {e})')
+        return None
+
+
+def resets_at(fh):
+    t = (fh or {}).get('resets_at')
+    return datetime.fromisoformat(t).astimezone() if t else None
+
+
+def ping(st, why):
+    WORKDIR.mkdir(parents=True, exist_ok=True)
+    st['last_ping'] = now().isoformat()
+    save_state(st)
+    try:
+        r = subprocess.run([CLAUDE, '-p', 'Reply with just: OK', '--model', 'haiku', '--effort', 'low'],
+                           capture_output=True, text=True, timeout=180, cwd=str(WORKDIR),
+                           stdin=subprocess.DEVNULL)
+        out = (r.stdout + r.stderr).strip().replace('\n', ' ')[:200]
+    except subprocess.TimeoutExpired:
+        out = 'timed out'
+    log(f'PING ({why}) -> {out}')
+    fh = usage()
+    end = resets_at(fh)
+    if end and end > now():
+        msg = f'New 5-hour window started. Resets {end:%H:%M}'
+    else:
+        msg = f'Pinged Claude ({out[:60]})'
+    log(msg)
+    notify(msg)
+
+
+def switch_off():
+    log('past the Thu 4pm deadline, switching off')
+    notify('Weekly reset reached. Window pinger switched off.')
+    plist = Path.home() / f'Library/LaunchAgents/{LABEL}.plist'
+    if plist.exists():
+        plist.rename(plist.with_suffix('.plist.done'))
+    subprocess.run(['launchctl', 'bootout', f'gui/{os.getuid()}/{LABEL}'], capture_output=True)
+
+
+def check():
+    if now() >= DEADLINE:
+        return switch_off()
+    st = load_state()
+    last = datetime.fromisoformat(st['last_ping']) if st.get('last_ping') else None
+    if last and now() - last < MIN_GAP:
+        return
+    fh = usage()
+    if fh is None:
+        # usage page unreadable (often an expired login token). A ping refreshes the token,
+        # so try one, but at most every 30 minutes.
+        if not last or now() - last > timedelta(minutes=30):
+            ping(st, 'usage page unreadable')
+        return
+    end = resets_at(fh)
+    if end is None or end <= now():
+        ping(st, 'no window running')
+
+
+def status():
+    fh = usage()
+    end = resets_at(fh)
+    if fh is None:
+        print('could not read the usage page')
+    elif end and end > now():
+        print(f'window running: {fh.get("utilization")}% used, resets {end:%a %H:%M}')
+    else:
+        print('no window running (next check will ping)')
+    print(f'switches off: {DEADLINE:%a %d %b %H:%M}')
+    if LOG.exists():
+        print('\nlast log lines:')
+        print(''.join(LOG.read_text().splitlines(True)[-8:]), end='')
+
+
+if __name__ == '__main__':
+    status() if sys.argv[1:] == ['status'] else check()
