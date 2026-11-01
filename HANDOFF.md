@@ -37,6 +37,6 @@ Cancel a run: `~/scripts/ltx-stop.sh`.
 - Nothing but Terminal open while generating — the pipeline needs ~13GB, Claude is ~3GB.
 - The step counter FREEZES during decode. That is normal, not a stall. Watch the
   heartbeat (ticks every 15s). `ltx-monitor.sh` was already fixed for this.
-- `~/scripts` is UNCOMMITTED and on branch `fix/downloads-none-found`, not main. The
-  6 new ltx-*.sh files plus a modified backup-all.sh. **mac-scripts is a PUBLIC repo.**
+- `~/scripts` is on `main` again (1 Nov 2026; it had sat on the old `fix/downloads-none-found`
+  branch since May, and the ltx-*.sh files were committed there by backups). **mac-scripts is a PUBLIC repo.**
 - `ltx-watch.sh` is superseded by `ltx-monitor.sh` — delete it.
