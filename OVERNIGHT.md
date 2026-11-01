@@ -48,8 +48,17 @@ Everything for a job is in `~/.overnight/jobs/<name>/`:
 it's unplugged), or the weekly limit.
 
 The overnight Claude is told: never ask questions, keep PROGRESS.md current, commit at milestones,
-never push/deploy/publish/message/spend unless the brief says so, no subagents (blocked with
-`--disallowedTools`), and write DONE only when everything is finished and checked.
+never push/deploy/publish/message/spend unless the brief says so, and write DONE only when
+everything is finished and checked.
+
+**Helpers (Zac's rule 13, from 1 Nov 2026):** Opus owns the job and hands small pieces to the
+cheap helpers: `Explore` and `haiku-scout` (Haiku) for searching, tests and long logs,
+`sonnet-helper` (Sonnet) for clearly specified build pieces it then checks. Workflows and
+questions are always blocked with `--disallowedTools`. In game folders (the `GAMES` list at the
+top of `overnight`, kept in step with `~/.claude/hooks/ask-before-helper.sh`) helpers are
+blocked too; SUBNORTICA keeps its 12 Oct exception. Overnight the hook turns every "ask Zac"
+into a no (it sees `OVERNIGHT_JOB_DIR`), so a pricey helper (general-purpose, a fork, an Opus
+override) is refused instead of waiting. REPORT.md has a "Helpers:" line counted from the log.
 
 ## Testing
 

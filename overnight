@@ -51,6 +51,10 @@ LIMIT_RE = re.compile(r'usage limit|session limit|weekly limit|hit your [a-z ]*l
 WEEKLY_RE = re.compile(r'weekly limit|week', re.I)
 LOST_RE = re.compile(r'no conversation found|session .*not found|could not find (session|conversation)', re.I)
 ACTIVE = ('starting', 'running', 'holding')
+# Zac's rule 13 (1 Nov 2026): overnight jobs hand small pieces to the cheap helpers too, except in games (Opus only;
+# SUBNORTICA keeps its 12 Oct exception). Keep GAMES in step with ~/.claude/hooks/ask-before-helper.sh.
+GAMES = ('san-andreas', 'maelstrom', 'peninsula', 'old-peninsula', 'thornbridge', 'overgrowth', 'beacon',
+         'escape-rooms', 'meridian', 'fablecraft', 'car-kit', 'breeze-lab', 'streetball-pro')
 
 
 def now():
@@ -78,6 +82,40 @@ def tail(path, n=12000):
             return f.read().decode('utf8', 'replace')
     except Exception:
         return ''
+
+
+def helpers_allowed(project):
+    """False in a game folder (games are Opus only), True everywhere else."""
+    p = Path(project).expanduser().resolve()
+    games = [(Path.home() / g).resolve() for g in GAMES]
+    return not any(p == g or g in p.parents for g in games)
+
+
+def helper_counts(logf):
+    """The helpers Claude called, from the stream log: ({helper type: calls}, calls that were refused)."""
+    used, ids, refused = {}, set(), 0
+    try:
+        f = open(logf)
+    except OSError:
+        return used, refused
+    with f:
+        for line in f:
+            if 'tool_use' not in line:  # cheap skip; tool_use and tool_result lines both carry it
+                continue
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            for b in (d.get('message') or {}).get('content') or []:
+                if not isinstance(b, dict):
+                    continue
+                if b.get('type') == 'tool_use' and b.get('name') in ('Agent', 'Task'):
+                    kind = (b.get('input') or {}).get('subagent_type') or 'general-purpose'
+                    used[kind] = used.get(kind, 0) + 1
+                    ids.add(b.get('id'))
+                elif b.get('type') == 'tool_result' and b.get('is_error') and b.get('tool_use_id') in ids:
+                    refused += 1
+    return used, refused
 
 
 def notify(title, text):
@@ -187,9 +225,17 @@ Rules for the night:
 - Keep {progress} up to date after every chunk of work: what is done, what is next, decisions you made. If you are restarted from scratch, that file is how you carry on.
 - You can be stopped at ANY moment by the usage limit and resumed later in this same conversation. That is normal. Keep the work in a state you can pick up again.
 - If the folder is a git repo, commit at every working milestone. Never push, deploy, publish, send messages or spend money unless the brief explicitly says to.
-- Do not use subagents. Do not start anything that runs forever in the foreground (servers go in the background).
+{helpers}
+- Do not start anything that runs forever in the foreground (servers go in the background).
 - Stop starting big new pieces near {until}; the night ends then.
 - When EVERY part of the brief is finished and checked, write {done} containing a short summary for Zac (what got done, what didn't, anything he must check). Never write it early: writing it ends the night."""
+
+HELPERS_ON = """- Helpers (Zac's rule): you own this job. You plan, decide, make the important edits and check everything. Hand small pieces to the cheap helpers when that saves a lot of reading (roughly 10k+ tokens of files, logs or output), not for one small file:
+  · Explore (Haiku): where is X, what calls Y, map a folder before you edit.
+  · haiku-scout (Haiku, read-only): run tests or checks and report only what failed; read long logs and command output; check whether a build, run or render has finished; pull the needed parts out of long docs.
+  · sonnet-helper (Sonnet): a clearly specified build piece, mechanical edits across many files, tests from a spec. Read and check every change it makes before you commit.
+  Give each helper an exact brief and ask for paths, line numbers and key lines back so you never re-read. Never use general-purpose, forks or a model override (those cost Opus prices), and never a Workflow. Note in {progress} which helpers did what, and say it in one line in {done}."""
+HELPERS_OFF = '- Do not use subagents: this is a game, and games are Opus only.'
 
 PROMPT_LIMIT = ('The usage limit has reset. Carry on with the brief exactly where you stopped (check {progress} '
                 'and git status first if you are unsure). Remember: when everything is finished, write {done}.')
@@ -218,8 +264,10 @@ class Job:
     # paths Claude is told about
     @property
     def paths(self):
-        return dict(brief=self.dir / 'BRIEF.md', progress=self.dir / 'PROGRESS.md', done=self.dir / 'DONE',
-                    project=self.cfg['project'], until=self.deadline.strftime('%H:%M'))
+        p = dict(brief=self.dir / 'BRIEF.md', progress=self.dir / 'PROGRESS.md', done=self.dir / 'DONE',
+                 project=self.cfg['project'], until=self.deadline.strftime('%H:%M'))
+        p['helpers'] = (HELPERS_ON if helpers_allowed(p['project']) else HELPERS_OFF).format(**p)
+        return p
 
     @property
     def deadline(self):
@@ -278,7 +326,9 @@ class Job:
     def launch(self, prompt, resume):
         cmd = [self.cfg['claude'], '-p', prompt, '--model', self.cfg['model'], '--effort', self.cfg['effort'],
                '--dangerously-skip-permissions', '--output-format', 'stream-json', '--verbose',
-               '--disallowedTools', 'Agent', 'Task', 'Workflow', 'AskUserQuestion']
+               '--disallowedTools', 'Workflow', 'AskUserQuestion']
+        if not helpers_allowed(self.cfg['project']):
+            cmd += ['Agent', 'Task']
         if resume:
             cmd += ['--resume', resume]
         with open(self.logf, 'a') as out:
@@ -447,12 +497,19 @@ class Job:
             pass
         done = (p / 'DONE').read_text().strip() if (p / 'DONE').exists() else '(Claude did not write a summary.)'
         events = (p / 'events.log').read_text() if (p / 'events.log').exists() else ''
+        used, refused = helper_counts(self.logf)
+        helpers = ', '.join(f'{k} ×{n}' for k, n in sorted(used.items(), key=lambda kv: -kv[1])) or 'none'
+        if refused:
+            helpers += f' ({refused} refused)'
+        if not helpers_allowed(self.cfg['project']):
+            helpers += ' (game: helpers blocked)'
         r = [f'# Overnight report — {self.name}', '',
              f'**How it ended:** {self.st.get("end_reason", "?")}', '',
              f'- Project: `{self.cfg["project"]}`',
              f'- Ran {started:%a %H:%M} → {now():%a %H:%M} · Claude runs: {self.st.get("runs", 0)} · '
              f'usage-limit waits: {self.st.get("limits", 0)} · nudges: {self.st.get("nudges", 0)} · '
-             f'crashes: {self.st.get("crashes", 0)}', '',
+             f'crashes: {self.st.get("crashes", 0)}',
+             f'- Helpers: {helpers}', '',
              "## Claude's summary", '', done, '',
              '## Commits made tonight', '', '```', commits or '(none)', '```', '',
              '## Timeline', '', '```', events.strip(), '```', '',
