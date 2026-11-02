@@ -52,9 +52,14 @@ WEEKLY_RE = re.compile(r'weekly limit|week', re.I)
 LOST_RE = re.compile(r'no conversation found|session .*not found|could not find (session|conversation)', re.I)
 ACTIVE = ('starting', 'running', 'holding')
 # Zac's rule 13 (1 Nov 2026): overnight jobs hand small pieces to the cheap helpers too, except in games (Opus only;
-# SUBNORTICA keeps its 12 Oct exception). Keep GAMES in step with ~/.claude/hooks/ask-before-helper.sh.
-GAMES = ('san-andreas', 'maelstrom', 'peninsula', 'old-peninsula', 'thornbridge', 'overgrowth', 'beacon',
-         'escape-rooms', 'meridian', 'fablecraft', 'car-kit', 'breeze-lab', 'streetball-pro')
+# SUBNORTICA keeps its 12 Oct exception). The game list lives in ~/.claude/game-folders.txt (Zac, 3 Nov 2026),
+# shared with the helper hooks; the tuple below is only a fallback if that file is missing.
+try:
+    GAMES = tuple(l.strip() for l in (Path.home() / '.claude/game-folders.txt').read_text().splitlines()
+                  if l.strip() and not l.startswith('#'))
+except OSError:
+    GAMES = ('san-andreas', 'maelstrom', 'peninsula', 'old-peninsula', 'thornbridge', 'overgrowth', 'beacon',
+             'escape-rooms', 'meridian', 'fablecraft', 'car-kit', 'breeze-lab', 'streetball-pro', 'gambit')
 
 
 def now():
