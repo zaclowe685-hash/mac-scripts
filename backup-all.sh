@@ -16,6 +16,11 @@ cd "$HOME" || exit 1
 
 # Every real project folder. Add new ones here (or let /new-project do it).
 PROJECTS=(
+  "gambit"
+  "model-duel"
+  "radar"
+  "scenes"
+  "island"
   "master"
   "study-packs"
   "daccord"
