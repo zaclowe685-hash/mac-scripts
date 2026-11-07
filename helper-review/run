@@ -1,0 +1,14 @@
+#!/bin/zsh
+# Helper review: what the cheap helpers (Explore, haiku-scout, sonnet-helper) cost and saved since a date.
+# Usage: ~/scripts/helper-review/run [YYYY-MM-DD Sydney start date, default 7 days ago]
+# Made 7 Nov 2026 (helper review 2). Prices live in 1_costs.py (Opus 4/20/0.20, Sonnet 2/10/0.10, Haiku 0.10/0.50/0.01 per M).
+# Savings use three assumptions (low/mid/high) about how much Opus would have read itself; see 3_analysis.py.
+set -e
+day=${1:-$(date -v-7d +%Y-%m-%d)}
+export HR_START=$(TZ=Australia/Sydney date -j -f "%Y-%m-%d %H:%M:%S" "$day 00:00:00" +%s | xargs -I{} date -u -r {} +%Y-%m-%dT%H:%M:%SZ)
+export HR_OUT=/tmp/helper-review; mkdir -p $HR_OUT
+here=${0:A:h}
+echo "Helper review since $day (Sydney) = $HR_START"
+python3 -I $here/1_costs.py | tail -12
+python3 -I $here/2_runs.py > $HR_OUT/runs.txt; echo "\n$(wc -l < $HR_OUT/runs.txt | tr -d ' ') helper runs (list: $HR_OUT/runs.txt)"
+python3 -I $here/3_analysis.py | sed -n '1,/^C\./p'
