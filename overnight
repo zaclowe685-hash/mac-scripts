@@ -6,12 +6,12 @@ The no-token alarm clock. This script never thinks and uses no usage. It:
   * when Claude stops at the 5-hour limit, reads the reset time from the error, waits,
     then resumes THE SAME conversation ("the limit has reset, carry on") — no clicks;
   * restarts Claude if it freezes, crashes, or stops early without finishing;
-  * stops at a deadline (default 06:00): one last "wrap up" turn, then a morning REPORT.md.
+  * stops at a deadline (default 05:30): one last "wrap up" turn, then a morning REPORT.md.
 
 Survives: Claude Desktop quitting (model mode closes it), this script crashing, a reboot
 (a launchd agent, com.zac.overnight, revives unfinished jobs every 2 minutes).
 
-    overnight start <project-folder> <brief.md> [--name N] [--until 06:00 | --hours 8]
+    overnight start <project-folder> <brief.md> [--name N] [--until 05:30 | --hours 8]
                     [--effort high] [--model claude-opus-5-5]
     overnight status [name]        what every job is doing right now
     overnight log <name>           its timeline
@@ -616,7 +616,7 @@ def parse_until(until, hours):
     t = now()
     if hours:
         return t + timedelta(hours=float(hours))
-    h, m = (int(x) for x in (until or '06:00').split(':'))
+    h, m = (int(x) for x in (until or '05:30').split(':'))
     d = t.replace(hour=h, minute=m, second=0, microsecond=0)
     if d <= t:
         d += timedelta(days=1)
@@ -629,7 +629,7 @@ def cmd_start(args):
     ap.add_argument('project')
     ap.add_argument('brief')
     ap.add_argument('--name')
-    ap.add_argument('--until', help='HH:MM, default 06:00')
+    ap.add_argument('--until', help='HH:MM, default 05:30')
     ap.add_argument('--hours', type=float)
     ap.add_argument('--seconds', type=float, help=argparse.SUPPRESS)  # tests
     ap.add_argument('--effort', default='high', choices=['low', 'medium', 'high', 'xhigh', 'max'])

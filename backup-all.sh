@@ -40,7 +40,6 @@ PROJECTS=(
   "deck"
   "physics-course"
   "grove"
-  "night-shift"
   "payback"
   "ox-lab"
   abyssal basketball-game camping-map chess_game court-1v1 crimson-moon

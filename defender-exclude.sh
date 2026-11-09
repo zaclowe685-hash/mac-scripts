@@ -1,7 +1,8 @@
 #!/bin/zsh
 # Keep Microsoft Defender off Zac's projects (golden rule 15), with ONE fingerprint.
 # Adds every project in ~ (any folder with a .git), ~/UnrealProjects, and the overnight-lane log folders
-# (~/.overnight, ~/.claude/projects) to Defender's skip list, skipping folders that are already on it.
+# (~/.overnight, ~/.claude/projects) and T3 Code's worktrees (~/.t3) to Defender's skip list,
+# skipping folders that are already on it.
 #
 #   zsh ~/scripts/defender-exclude.sh                  # exclude every project not excluded yet
 #   zsh ~/scripts/defender-exclude.sh ~/new-thing      # plus this folder (e.g. before its git init)
@@ -20,7 +21,19 @@ done
 excluded=$(mdatp exclusion list 2>/dev/null | sed -n 's/.*Path: "\(.*\)"/\1/p')
 want=()
 for d in $HOME/*(/); do [[ -e $d/.git ]] && want+=("$d"); done
-for d in $HOME/UnrealProjects $HOME/.overnight $HOME/.claude/projects "${extra[@]}"; do [[ -d $d ]] && want+=("$d"); done
+for d in $HOME/UnrealProjects $HOME/.overnight $HOME/.claude/projects $HOME/.t3 "${extra[@]}"; do [[ -d $d ]] && want+=("$d"); done
+# Busiest non-project folders (measured 7 Nov 2026: ~95% of files changed per day outside projects).
+# Normal developer/app-cache exclusions; Downloads and Desktop stay scanned on purpose.
+busy=(
+  "$HOME/Library/Caches/Google"                         # Chrome cache (~15k files/day)
+  "$HOME/Library/Application Support/Claude"            # Claude app + sessions (~3.5k)
+  "$HOME/Library/Group Containers/UBF8T346G9.Office"    # Word/Outlook/OneNote shared data (~2.5k)
+  "$HOME/Library/Application Support/Google"            # Chrome profile (~2.4k)
+  "$HOME/.claude"                                       # Claude Code settings, hooks, memory (~1k)
+  "$HOME/Library/Caches/claude-cli-nodejs"              # Claude Code cache
+  "/opt/homebrew"                                       # Python/Node and other coding tools
+)
+for d in "${busy[@]}"; do [[ -d $d ]] && want+=("$d"); done
 todo=()
 for d in "${(u)want[@]}"; do print -r -- "$excluded" | grep -qxF -- "$d" || todo+=("$d"); done
 
