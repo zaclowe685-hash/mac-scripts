@@ -111,7 +111,9 @@ def helper_counts(logf):
                 d = json.loads(line)
             except ValueError:
                 continue
-            for b in (d.get('message') or {}).get('content') or []:
+            msg = d.get('message') if isinstance(d, dict) else None
+            content = msg.get('content') if isinstance(msg, dict) else None
+            for b in content if isinstance(content, list) else []:
                 if not isinstance(b, dict):
                     continue
                 if b.get('type') == 'tool_use' and b.get('name') in ('Agent', 'Task'):
