@@ -16,6 +16,7 @@ cd "$HOME" || exit 1
 
 # Every real project folder. Add new ones here (or let /new-project do it).
 PROJECTS=(
+  "creed"
   "voiceflow-pocket"
   "gambit"
   "model-duel"
@@ -53,7 +54,7 @@ PROJECTS=(
   quant-bench qwen-local replyd sever shallows stream-watch terminus
   throwdown-fable throwdown-glm ox-alpha-ideas game-plans hq-context
   "Comparison 1" "Comparison 2" pull-up keyring navier-stokes green-light snake-game riftwake
-  parle gapmap-bonsai silk vapour old-peninsula peninsula beacon car-kit
+  gapmap-bonsai silk vapour old-peninsula peninsula beacon car-kit
 )
 
 # These repos are deliberately PUBLIC and must stay public — they are live
