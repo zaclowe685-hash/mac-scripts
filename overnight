@@ -96,6 +96,13 @@ def helpers_allowed(project):
     return not any(p == g or g in p.parents for g in games)
 
 
+def creed_critic(project):
+    """CREED keeps the Agent tool for its ONE helper, the screenshot critic (spec §3, Zac 8 Nov 2026).
+    ~/.claude/hooks/ask-before-helper.sh lets only creed-critic through and denies every other helper overnight."""
+    p, c = Path(project).expanduser().resolve(), (Path.home() / 'creed').resolve()
+    return p == c or c in p.parents
+
+
 def helper_counts(logf):
     """The helpers Claude called, from the stream log: ({helper type: calls}, calls that were refused)."""
     used, ids, refused = {}, set(), 0
@@ -243,6 +250,8 @@ HELPERS_ON = """- Helpers (Zac's rule): you own this job. You plan, decide, make
   · sonnet-helper (Sonnet): a clearly specified build piece, mechanical edits across many files, tests from a spec. Read and check every change it makes before you commit.
   Give each helper an exact brief and ask for paths, line numbers and key lines back so you never re-read. Never use general-purpose, forks or a model override (those cost Opus prices), and never a Workflow. Note in {progress} which helpers did what, and say it in one line in {done}."""
 HELPERS_OFF = '- Do not use subagents: this is a game, and games are Opus only.'
+HELPERS_CREED = ('- Do not use subagents (games are Opus only), except the ONE allowed: subagent_type "creed-critic" '
+                 '(model opus or fable) to score screenshots with ~/creed/tools/shots/CRITIC.md.')
 
 PROMPT_LIMIT = ('The usage limit has reset. Carry on with the brief exactly where you stopped (check {progress} '
                 'and git status first if you are unsure). Remember: when everything is finished, write {done}.')
@@ -273,7 +282,8 @@ class Job:
     def paths(self):
         p = dict(brief=self.dir / 'BRIEF.md', progress=self.dir / 'PROGRESS.md', done=self.dir / 'DONE',
                  project=self.cfg['project'], until=self.deadline.strftime('%H:%M'))
-        p['helpers'] = (HELPERS_ON if helpers_allowed(p['project']) else HELPERS_OFF).format(**p)
+        p['helpers'] = (HELPERS_ON if helpers_allowed(p['project'])
+                        else HELPERS_CREED if creed_critic(p['project']) else HELPERS_OFF).format(**p)
         return p
 
     @property
@@ -334,7 +344,7 @@ class Job:
         cmd = [self.cfg['claude'], '-p', prompt, '--model', self.cfg['model'], '--effort', self.cfg['effort'],
                '--dangerously-skip-permissions', '--output-format', 'stream-json', '--verbose',
                '--disallowedTools', 'Workflow', 'AskUserQuestion']
-        if not helpers_allowed(self.cfg['project']):
+        if not helpers_allowed(self.cfg['project']) and not creed_critic(self.cfg['project']):
             cmd += ['Agent', 'Task']
         if resume:
             cmd += ['--resume', resume]
