@@ -8,7 +8,7 @@ The no-token alarm clock. This script never thinks and uses no usage. It:
   * restarts Claude if it freezes, crashes, or stops early without finishing;
   * stops at a deadline (default 05:30): one last "wrap up" turn, then a morning REPORT.md.
 
-Survives: Claude Desktop quitting (model mode closes it), this script crashing, a reboot
+Survives: the Claude app or T3 Code quitting, this script crashing, a reboot
 (a launchd agent, com.zac.overnight, revives unfinished jobs every 2 minutes).
 
     overnight start <project-folder> <brief.md> [--name N] [--until 05:30 | --hours 8]
@@ -59,7 +59,7 @@ try:
                   if l.strip() and not l.startswith('#'))
 except OSError:
     GAMES = ('san-andreas', 'maelstrom', 'peninsula', 'old-peninsula', 'thornbridge', 'overgrowth', 'beacon',
-             'escape-rooms', 'meridian', 'fablecraft', 'car-kit', 'breeze-lab', 'streetball-pro', 'gambit')
+             'escape-rooms', 'meridian', 'fablecraft', 'car-kit', 'streetball-pro', 'gambit')
 
 
 def now():

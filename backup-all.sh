@@ -16,11 +16,11 @@ cd "$HOME" || exit 1
 
 # Every real project folder. Add new ones here (or let /new-project do it).
 PROJECTS=(
+  "exam-lock"
   "creed"
   "voiceflow-pocket"
   "gambit"
   "model-duel"
-  "radar"
   "scenes"
   "island"
   "master"
@@ -48,13 +48,13 @@ PROJECTS=(
   glm-prompts hoopfeel house-walkthrough lumen meal-planner meridian
   maine-country morning-briefing project-hub redline scripts specimen streetball-mine
   streetball-pro streetball-raw subtracker taskify tower_defence vinterheim
-  desmos-fourier model-mode voiceflow voidstrike xenathel "Space Journey"
-  hours mystery bench thornbridge dynasty long-night court-legends voice-lab breeze-lab
+  desmos-fourier voiceflow voidstrike xenathel "Space Journey"
+  hours mystery thornbridge dynasty long-night court-legends
   abandoned carve new-money npc-lab ox-lab-cloud ox-sims physarum
-  quant-bench qwen-local replyd sever shallows stream-watch terminus
+  replyd sever shallows stream-watch terminus
   throwdown-fable throwdown-glm ox-alpha-ideas game-plans hq-context
   "Comparison 1" "Comparison 2" pull-up keyring navier-stokes green-light snake-game riftwake
-  gapmap-bonsai silk vapour old-peninsula peninsula beacon car-kit
+  silk vapour old-peninsula peninsula beacon car-kit
 )
 
 # These repos are deliberately PUBLIC and must stay public — they are live
