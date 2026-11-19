@@ -47,7 +47,7 @@ PROJECTS=(
   deep-field dinner-planner earth-impact escape-rooms forest-walk gap-map
   glm-prompts hoopfeel house-walkthrough lumen meal-planner meridian
   maine-country morning-briefing project-hub redline scripts specimen streetball-mine
-  streetball-pro streetball-raw subtracker taskify tower_defence vinterheim
+  streetball-pro streetball-raw subtracker taskify taskify-starter tower_defence vinterheim
   desmos-fourier voiceflow voidstrike xenathel "Space Journey"
   hours mystery thornbridge dynasty long-night court-legends
   abandoned carve new-money npc-lab ox-lab-cloud ox-sims physarum
